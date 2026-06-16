@@ -131,6 +131,26 @@ type DeviceOrientationEventWithPermission = typeof DeviceOrientationEvent & {
   requestPermission?: () => Promise<PermissionState>;
 };
 
+type BodyMetrics = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  angle: number;
+};
+
+type DragState = {
+  activeId: string;
+  body: Matter.Body | null;
+  offsetX: number;
+  offsetY: number;
+  lastX: number;
+  lastY: number;
+  lastAt: number;
+  velocityX: number;
+  velocityY: number;
+};
+
 const normalizeSocialLinks = (links: SocialLink[]) =>
   links.map((link) => {
     const key = `${link.name} ${link.url}`.toLowerCase();
@@ -154,8 +174,20 @@ const HomePage = () => {
   const sceneRef = useRef<HTMLElement | null>(null);
   const engineRef = useRef<Matter.Engine | null>(null);
   const elementsRef = useRef(new Map<string, HTMLElement>());
+  const bodiesByIdRef = useRef(new Map<string, Matter.Body>());
   const physicsBodiesRef = useRef<Matter.Body[]>([]);
-  const bodyMetricsRef = useRef(new Map<string, { x: number; y: number; width: number; height: number; angle: number }>());
+  const bodyMetricsRef = useRef(new Map<string, BodyMetrics>());
+  const dragStateRef = useRef<DragState>({
+    activeId: '',
+    body: null,
+    offsetX: 0,
+    offsetY: 0,
+    lastX: 0,
+    lastY: 0,
+    lastAt: 0,
+    velocityX: 0,
+    velocityY: 0,
+  });
   const tiltPermissionRequestedRef = useRef(false);
   const motionGravityActiveRef = useRef(false);
   const lastHapticAtRef = useRef(0);
@@ -249,6 +281,20 @@ const HomePage = () => {
     return () => {
       window.clearTimeout(resizeTimer);
       observer.disconnect();
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    document.fonts?.ready.then(() => {
+      if (!cancelled) {
+        setSceneVersion((version) => version + 1);
+      }
+    });
+
+    return () => {
+      cancelled = true;
     };
   }, []);
 
@@ -447,22 +493,28 @@ const HomePage = () => {
     [displayedSocialLinks],
   );
 
-  const findLinkHit = (clientX: number, clientY: number) => {
+  const getScenePoint = (clientX: number, clientY: number) => {
     const scene = sceneRef.current;
-    if (!scene) return '';
+    if (!scene) return null;
 
     const sceneRect = scene.getBoundingClientRect();
-    const x = clientX - sceneRect.left;
-    const y = clientY - sceneRect.top;
-    const linkIds = new Set(displayedSocialLinks.map((link) => link.id));
+    return {
+      x: clientX - sceneRect.left,
+      y: clientY - sceneRect.top,
+    };
+  };
+
+  const findMetricsHit = (clientX: number, clientY: number, allowedIds: Set<string>, padding = 6) => {
+    const point = getScenePoint(clientX, clientY);
+    if (!point) return '';
+
     let bestHit: { id: string; distance: number } | null = null;
 
     bodyMetricsRef.current.forEach((metrics, id) => {
-      if (!linkIds.has(id)) return;
+      if (!allowedIds.has(id)) return;
 
-      const padding = 4;
-      const dx = x - metrics.x;
-      const dy = y - metrics.y;
+      const dx = point.x - metrics.x;
+      const dy = point.y - metrics.y;
       const cos = Math.cos(-metrics.angle);
       const sin = Math.sin(-metrics.angle);
       const localX = dx * cos - dy * sin;
@@ -483,6 +535,41 @@ const HomePage = () => {
     });
 
     return bestHit?.id || '';
+  };
+
+  const findDraggableHit = (clientX: number, clientY: number) => {
+    const point = getScenePoint(clientX, clientY);
+    if (!point) return '';
+
+    let bestHit: { id: string; distance: number } | null = null;
+
+    bodiesByIdRef.current.forEach((body, id) => {
+      const parts = body.parts.length > 1 ? body.parts.slice(1) : [body];
+      if (!Matter.Query.point(parts, point).length) return;
+
+      const distance = Math.hypot(point.x - body.position.x, point.y - body.position.y);
+      if (!bestHit || distance < bestHit.distance) {
+        bestHit = { id, distance };
+      }
+    });
+
+    if (bestHit) return bestHit.id;
+
+    return findMetricsHit(clientX, clientY, new Set(pieces.map((piece) => piece.id)), 8);
+  };
+
+  const clearDragState = () => {
+    dragStateRef.current = {
+      activeId: '',
+      body: null,
+      offsetX: 0,
+      offsetY: 0,
+      lastX: 0,
+      lastY: 0,
+      lastAt: 0,
+      velocityX: 0,
+      velocityY: 0,
+    };
   };
 
   useLayoutEffect(() => {
@@ -597,9 +684,14 @@ const HomePage = () => {
         if (!element) return null;
 
         element.style.opacity = '0';
+        element.style.left = '0px';
+        element.style.top = '0px';
+        element.style.transform = 'none';
         const rect = element.getBoundingClientRect();
-        const pieceWidth = piece.kind === 'name' ? Math.max(rect.width, 230) : Math.max(rect.width, 56);
-        const pieceHeight = piece.kind === 'name' ? Math.max(rect.height, 92) : Math.max(rect.height, 56);
+        const measuredWidth = element.offsetWidth || rect.width;
+        const measuredHeight = element.offsetHeight || rect.height;
+        const pieceWidth = piece.kind === 'name' ? Math.max(measuredWidth, 230) : Math.max(measuredWidth, 56);
+        const pieceHeight = piece.kind === 'name' ? Math.max(measuredHeight, 92) : Math.max(measuredHeight, 56);
         const column = index % 3;
         const row = Math.floor(index / 3);
         const xBase = width * (0.28 + column * 0.22);
@@ -637,18 +729,7 @@ const HomePage = () => {
       .filter(Boolean) as Matter.Body[];
 
     physicsBodiesRef.current = bodies;
-
-    const mouse = Matter.Mouse.create(scene);
-    const mouseConstraint = Matter.MouseConstraint.create(engine, {
-      mouse,
-      constraint: {
-        stiffness: 0.24,
-        damping: 0.06,
-        render: {
-          visible: false,
-        },
-      },
-    });
+    bodiesByIdRef.current = bodiesById;
 
     const pulseHaptic = (event: Matter.IEventCollision<Matter.Engine>) => {
       const canVibrate = window.matchMedia('(pointer: coarse)').matches && 'vibrate' in navigator;
@@ -696,7 +777,7 @@ const HomePage = () => {
 
     Matter.Events.on(engine, 'beforeUpdate', limitVelocity);
     Matter.Events.on(engine, 'collisionStart', pulseHaptic);
-    Matter.Composite.add(engine.world, [...walls, ...bodies, mouseConstraint]);
+    Matter.Composite.add(engine.world, [...walls, ...bodies]);
     Matter.Runner.run(runner, engine);
 
     let frameId = 0;
@@ -710,17 +791,21 @@ const HomePage = () => {
         const sin = Math.sin(body.angle);
         const visualX = body.position.x + offset.x * cos - offset.y * sin;
         const visualY = body.position.y + offset.x * sin + offset.y * cos;
+        const size = bodySizesById.get(id);
+        const renderedWidth = element.offsetWidth || size?.width || 0;
+        const renderedHeight = element.offsetHeight || size?.height || 0;
 
-        element.style.transform = `translate3d(${visualX}px, ${visualY}px, 0) translate(-50%, -50%) rotate(${body.angle}rad)`;
+        element.style.left = `${visualX - renderedWidth / 2}px`;
+        element.style.top = `${visualY - renderedHeight / 2}px`;
+        element.style.transform = `rotate(${body.angle}rad)`;
         element.style.opacity = '1';
 
-        const size = bodySizesById.get(id);
         if (size) {
           bodyMetricsRef.current.set(id, {
-            x: body.position.x,
-            y: body.position.y,
-            width: size.width,
-            height: size.height,
+            x: visualX,
+            y: visualY,
+            width: renderedWidth || size.width,
+            height: renderedHeight || size.height,
             angle: body.angle,
           });
         }
@@ -735,24 +820,18 @@ const HomePage = () => {
       window.cancelAnimationFrame(frameId);
       Matter.Events.off(engine, 'beforeUpdate', limitVelocity);
       Matter.Events.off(engine, 'collisionStart', pulseHaptic);
-      Matter.Mouse.clearSourceEvents(mouse);
       Matter.Runner.stop(runner);
       Matter.Composite.clear(engine.world, false);
       Matter.Engine.clear(engine);
       if (engineRef.current === engine) {
         engineRef.current = null;
       }
+      clearDragState();
+      bodiesByIdRef.current.clear();
       physicsBodiesRef.current = [];
       bodyMetricsRef.current.clear();
     };
   }, [pieces, sceneVersion]);
-
-  const handlePointerDown = (id: string) => (event: React.PointerEvent<HTMLElement>) => {
-    clickStateRef.current.activeId = id;
-    clickStateRef.current.startX = event.clientX;
-    clickStateRef.current.startY = event.clientY;
-    clickStateRef.current.dragged = false;
-  };
 
   const openLink = (url: string) => {
     if (url.startsWith('mailto:')) {
@@ -771,13 +850,64 @@ const HomePage = () => {
       requestDeviceTilt();
     }
 
-    const id = findLinkHit(event.clientX, event.clientY);
+    const id = findDraggableHit(event.clientX, event.clientY);
     if (!id) return;
+
+    const point = getScenePoint(event.clientX, event.clientY);
+    const body = bodiesByIdRef.current.get(id) ?? null;
+    if (point && body) {
+      dragStateRef.current = {
+        activeId: id,
+        body,
+        offsetX: body.position.x - point.x,
+        offsetY: body.position.y - point.y,
+        lastX: body.position.x,
+        lastY: body.position.y,
+        lastAt: performance.now(),
+        velocityX: 0,
+        velocityY: 0,
+      };
+      Matter.Sleeping.set(body, false);
+      Matter.Body.setAngularVelocity(body, body.angularVelocity * 0.4);
+      event.currentTarget.setPointerCapture?.(event.pointerId);
+    }
 
     clickStateRef.current.activeId = id;
     clickStateRef.current.startX = event.clientX;
     clickStateRef.current.startY = event.clientY;
     clickStateRef.current.dragged = false;
+    event.preventDefault();
+  };
+
+  const handleScenePointerMoveCapture = (event: React.PointerEvent<HTMLElement>) => {
+    const dragState = dragStateRef.current;
+    if (!dragState.body) return;
+
+    const point = getScenePoint(event.clientX, event.clientY);
+    if (!point) return;
+
+    const nextX = point.x + dragState.offsetX;
+    const nextY = point.y + dragState.offsetY;
+    const now = performance.now();
+    const dt = Math.max(16, now - dragState.lastAt);
+    const velocityX = clamp(((nextX - dragState.lastX) / dt) * 16.67, -MAX_SPEED, MAX_SPEED);
+    const velocityY = clamp(((nextY - dragState.lastY) / dt) * 16.67, -MAX_SPEED, MAX_SPEED);
+    const clickState = clickStateRef.current;
+
+    if (Math.hypot(event.clientX - clickState.startX, event.clientY - clickState.startY) > 7) {
+      clickState.dragged = true;
+    }
+
+    Matter.Body.setPosition(dragState.body, { x: nextX, y: nextY });
+    Matter.Body.setVelocity(dragState.body, { x: velocityX, y: velocityY });
+
+    dragState.lastX = nextX;
+    dragState.lastY = nextY;
+    dragState.lastAt = now;
+    dragState.velocityX = velocityX;
+    dragState.velocityY = velocityY;
+
+    event.preventDefault();
   };
 
   const maybeOpenSceneLink = (
@@ -798,24 +928,24 @@ const HomePage = () => {
   };
 
   const handleScenePointerUpCapture = (event: React.PointerEvent<HTMLElement>) => {
+    const dragState = dragStateRef.current;
+    if (dragState.body) {
+      Matter.Body.setVelocity(dragState.body, {
+        x: dragState.velocityX,
+        y: dragState.velocityY,
+      });
+      clearDragState();
+      event.currentTarget.releasePointerCapture?.(event.pointerId);
+    }
+
     maybeOpenSceneLink(event);
   };
 
-  const handleSceneMouseDownCapture = (event: React.MouseEvent<HTMLElement>) => {
-    const target = event.target as HTMLElement | null;
-    if (target?.closest('button')) return;
-
-    const id = findLinkHit(event.clientX, event.clientY);
-    if (!id) return;
-
-    clickStateRef.current.activeId = id;
-    clickStateRef.current.startX = event.clientX;
-    clickStateRef.current.startY = event.clientY;
+  const handleScenePointerCancelCapture = (event: React.PointerEvent<HTMLElement>) => {
+    clearDragState();
+    clickStateRef.current.activeId = '';
     clickStateRef.current.dragged = false;
-  };
-
-  const handleSceneMouseUpCapture = (event: React.MouseEvent<HTMLElement>) => {
-    maybeOpenSceneLink(event);
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
   };
 
   const handleLinkClick = (id: string) => (event: React.MouseEvent<HTMLAnchorElement>) => {
@@ -834,9 +964,9 @@ const HomePage = () => {
       ref={sceneRef}
       aria-label="coah links gravity scene"
       onPointerDownCapture={handleScenePointerDownCapture}
+      onPointerMoveCapture={handleScenePointerMoveCapture}
       onPointerUpCapture={handleScenePointerUpCapture}
-      onMouseDownCapture={handleSceneMouseDownCapture}
-      onMouseUpCapture={handleSceneMouseUpCapture}
+      onPointerCancelCapture={handleScenePointerCancelCapture}
       className="fixed inset-0 h-[100dvh] max-h-[100dvh] w-full overflow-hidden overscroll-none bg-ctp-base text-ctp-text touch-none select-none"
     >
       <div aria-hidden="true" className="pointer-events-none absolute inset-0">
