@@ -1,4 +1,4 @@
-import type { FC } from 'react';
+import type { CSSProperties, FC } from 'react';
 import {
   ExternalLink,
   Globe,
@@ -17,7 +17,7 @@ import {
   Twitch
 } from 'lucide-react';
 
-type IconComponent = FC<{ className?: string }>;
+type IconComponent = FC<{ className?: string; style?: CSSProperties }>;
 
 interface PlatformVisuals {
   icon: IconComponent;
@@ -33,12 +33,13 @@ const createVisuals = (icon: IconComponent, gradient: string, hoverBg: string): 
 
 const normalize = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, '');
 
-const TikTokIcon: IconComponent = ({ className = '' }) => (
+const TikTokIcon: IconComponent = ({ className = '', style }) => (
   <svg
     viewBox="0 0 24 24"
     role="img"
     aria-hidden="true"
     className={className}
+    style={style}
     focusable="false"
   >
     <path
@@ -48,12 +49,13 @@ const TikTokIcon: IconComponent = ({ className = '' }) => (
   </svg>
 );
 
-const SteamIcon: IconComponent = ({ className = '' }) => (
+const SteamIcon: IconComponent = ({ className = '', style }) => (
   <svg
     viewBox="0 0 24 24"
     role="img"
     aria-hidden="true"
     className={className}
+    style={style}
     focusable="false"
   >
     <path
@@ -63,12 +65,13 @@ const SteamIcon: IconComponent = ({ className = '' }) => (
   </svg>
 );
 
-const DiscordIcon: IconComponent = ({ className = '' }) => (
+const DiscordIcon: IconComponent = ({ className = '', style }) => (
   <svg
     viewBox="0 0 24 24"
     role="img"
     aria-hidden="true"
     className={className}
+    style={style}
     focusable="false"
   >
     <path
@@ -78,12 +81,13 @@ const DiscordIcon: IconComponent = ({ className = '' }) => (
   </svg>
 );
 
-const KoFiIcon: IconComponent = ({ className = '' }) => (
+const KoFiIcon: IconComponent = ({ className = '', style }) => (
   <svg
     viewBox="0 0 24 24"
     role="img"
     aria-hidden="true"
     className={className}
+    style={style}
     focusable="false"
   >
     <path

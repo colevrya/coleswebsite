@@ -8,6 +8,9 @@ export default defineConfig(({ mode }) => ({
     host: "::",
     port: 8080,
   },
+  preview: {
+    allowedHosts: ["test.coah80.com"],
+  },
   base: "/",
   build: {
     outDir: "dist",
