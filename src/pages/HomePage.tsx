@@ -120,6 +120,9 @@ const MAX_ANGULAR_SPEED = 0.42;
 const DESKTOP_GRAVITY_Y = 0.74;
 const MOBILE_GRAVITY_SCALE = 0.56;
 const MOBILE_GRAVITY_LIMIT = 0.72;
+const WINDOW_SHAKE_THRESHOLD = 5.5;
+const WINDOW_SHAKE_COOLDOWN = 85;
+const WINDOW_SHAKE_VECTOR_SCALE = 32;
 
 const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
 
@@ -207,6 +210,54 @@ const HomePage = () => {
   });
   const [socialLinks, setSocialLinks] = useState<SocialLink[]>(normalizeSocialLinks(FALLBACK_SOCIAL_LINKS));
   const [sceneVersion, setSceneVersion] = useState(0);
+
+  const rotateForScreen = useCallback((rawX: number, rawY: number) => {
+    const legacyOrientation = (window as Window & { orientation?: number }).orientation;
+    const screenAngle = window.screen.orientation?.angle ?? legacyOrientation ?? 0;
+    const normalizedAngle = ((screenAngle % 360) + 360) % 360;
+    let x = rawX;
+    let y = rawY;
+
+    if (normalizedAngle === 90) {
+      x = -rawY;
+      y = rawX;
+    } else if (normalizedAngle === 270) {
+      x = rawY;
+      y = -rawX;
+    } else if (normalizedAngle === 180) {
+      x = -rawX;
+      y = -rawY;
+    }
+
+    return { x, y };
+  }, []);
+
+  const kickBodies = useCallback(
+    (rawX: number, rawY: number, rawZ: number, strength: number, rotateWithScreen = true) => {
+      const bodies = physicsBodiesRef.current;
+      if (!bodies.length) return;
+
+      const { x, y } = rotateWithScreen ? rotateForScreen(rawX, rawY) : { x: rawX, y: rawY };
+      const impulseX = clamp(-x, -1.35, 1.35) * 14.5 * strength;
+      const impulseY = clamp(-y, -1.35, 1.35) * 14.5 * strength;
+      const zLift = -clamp(Math.abs(rawZ), 0, 1.35) * 7 * strength;
+
+      for (const body of bodies) {
+        const jitterX = (Math.random() - 0.5) * 3.9 * strength;
+        const jitterY = (Math.random() - 0.5) * 3.9 * strength;
+
+        Matter.Body.setVelocity(body, {
+          x: clamp(body.velocity.x + impulseX + jitterX, -MAX_SPEED, MAX_SPEED),
+          y: clamp(body.velocity.y + impulseY + zLift + jitterY, -MAX_SPEED, MAX_SPEED),
+        });
+        Matter.Body.setAngularVelocity(
+          body,
+          clamp(body.angularVelocity + (Math.random() - 0.5) * 0.36 * strength, -MAX_ANGULAR_SPEED, MAX_ANGULAR_SPEED),
+        );
+      }
+    },
+    [rotateForScreen],
+  );
 
   useEffect(() => {
     let isMounted = true;
@@ -303,27 +354,6 @@ const HomePage = () => {
     const canUseMotion = 'DeviceMotionEvent' in window || 'DeviceOrientationEvent' in window;
     if (!isTouchDevice || !canUseMotion) return;
 
-    const rotateForScreen = (rawX: number, rawY: number) => {
-      const legacyOrientation = (window as Window & { orientation?: number }).orientation;
-      const screenAngle = window.screen.orientation?.angle ?? legacyOrientation ?? 0;
-      const normalizedAngle = ((screenAngle % 360) + 360) % 360;
-      let x = rawX;
-      let y = rawY;
-
-      if (normalizedAngle === 90) {
-        x = -rawY;
-        y = rawX;
-      } else if (normalizedAngle === 270) {
-        x = rawY;
-        y = -rawX;
-      } else if (normalizedAngle === 180) {
-        x = -rawX;
-        y = -rawY;
-      }
-
-      return { x, y };
-    };
-
     const applyScreenGravity = (rawX: number, rawY: number) => {
       const engine = engineRef.current;
       if (!engine) return;
@@ -346,35 +376,11 @@ const HomePage = () => {
 
         if (delta > 0.14 && now - lastTiltKickAtRef.current > 70) {
           lastTiltKickAtRef.current = now;
-          kickBodiesFromMotion(deltaX * 2.55, deltaY * 2.55, 0, clamp(delta * 3.25, 0.3, 1.45));
+          kickBodies(deltaX * 2.55, deltaY * 2.55, 0, clamp(delta * 3.25, 0.3, 1.45));
         }
       }
 
       lastGravityVectorRef.current = { ...nextGravity, at: now };
-    };
-
-    const kickBodiesFromMotion = (rawX: number, rawY: number, rawZ: number, strength: number) => {
-      const bodies = physicsBodiesRef.current;
-      if (!bodies.length) return;
-
-      const { x, y } = rotateForScreen(rawX, rawY);
-      const impulseX = clamp(-x, -1.35, 1.35) * 14.5 * strength;
-      const impulseY = clamp(-y, -1.35, 1.35) * 14.5 * strength;
-      const zLift = -clamp(Math.abs(rawZ), 0, 1.35) * 7 * strength;
-
-      for (const body of bodies) {
-        const jitterX = (Math.random() - 0.5) * 3.9 * strength;
-        const jitterY = (Math.random() - 0.5) * 3.9 * strength;
-
-        Matter.Body.setVelocity(body, {
-          x: clamp(body.velocity.x + impulseX + jitterX, -MAX_SPEED, MAX_SPEED),
-          y: clamp(body.velocity.y + impulseY + zLift + jitterY, -MAX_SPEED, MAX_SPEED),
-        });
-        Matter.Body.setAngularVelocity(
-          body,
-          clamp(body.angularVelocity + (Math.random() - 0.5) * 0.36 * strength, -MAX_ANGULAR_SPEED, MAX_ANGULAR_SPEED),
-        );
-      }
     };
 
     const handleMotion = (event: DeviceMotionEvent) => {
@@ -408,7 +414,7 @@ const HomePage = () => {
       if (shake < 4.1 || now - lastShakeAtRef.current < 65) return;
 
       lastShakeAtRef.current = now;
-      kickBodiesFromMotion(
+      kickBodies(
         impulseSource.x / 9.8,
         -impulseSource.y / 9.8,
         impulseSource.z / 9.8,
@@ -438,7 +444,70 @@ const HomePage = () => {
       lastMotionSampleRef.current = null;
       lastGravityVectorRef.current = null;
     };
-  }, []);
+  }, [kickBodies, rotateForScreen]);
+
+  useEffect(() => {
+    if (window.matchMedia('(pointer: coarse)').matches) return;
+
+    let frameId = 0;
+    let lastSample: { x: number; y: number; vx: number; vy: number; at: number } | null = null;
+    let lastKickAt = 0;
+    const getWindowPosition = () => {
+      const positionedWindow = window as Window & {
+        screenLeft?: number;
+        screenTop?: number;
+      };
+
+      return {
+        x: positionedWindow.screenX ?? positionedWindow.screenLeft ?? 0,
+        y: positionedWindow.screenY ?? positionedWindow.screenTop ?? 0,
+      };
+    };
+
+    const sampleWindowMotion = () => {
+      const { x, y } = getWindowPosition();
+      const now = performance.now();
+
+      if (lastSample) {
+        const dt = Math.max(16, now - lastSample.at);
+        const vx = ((x - lastSample.x) / dt) * 16.67;
+        const vy = ((y - lastSample.y) / dt) * 16.67;
+        const jerkX = vx - lastSample.vx;
+        const jerkY = vy - lastSample.vy;
+        const movement = Math.hypot(vx, vy);
+        const jerk = Math.hypot(jerkX, jerkY);
+        const shake = Math.max(movement * 0.65, jerk);
+
+        if (shake > WINDOW_SHAKE_THRESHOLD && now - lastKickAt > WINDOW_SHAKE_COOLDOWN) {
+          const useJerk = jerk > movement * 0.7;
+          const sourceX = useJerk ? jerkX : vx;
+          const sourceY = useJerk ? jerkY : vy;
+          const strength = clamp((shake - 4) / 22, 0.32, 1.45);
+
+          lastKickAt = now;
+          kickBodies(
+            sourceX / WINDOW_SHAKE_VECTOR_SCALE,
+            sourceY / WINDOW_SHAKE_VECTOR_SCALE,
+            shake / 48,
+            strength,
+            false,
+          );
+        }
+
+        lastSample = { x, y, vx, vy, at: now };
+      } else {
+        lastSample = { x, y, vx: 0, vy: 0, at: now };
+      }
+
+      frameId = window.requestAnimationFrame(sampleWindowMotion);
+    };
+
+    frameId = window.requestAnimationFrame(sampleWindowMotion);
+
+    return () => {
+      window.cancelAnimationFrame(frameId);
+    };
+  }, [kickBodies]);
 
   const requestDeviceTilt = useCallback(async () => {
     if (tiltPermissionRequestedRef.current) return;
